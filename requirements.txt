@@ -1,0 +1,7 @@
+kokoro>=0.9.4
+misaki[ja,zh]>=0.9.4
+gradio>=4.44
+langdetect>=1.0.9
+deep-translator>=1.11
+numpy
+torch
