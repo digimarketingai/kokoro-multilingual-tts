@@ -2,28 +2,50 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.eggs/
-build/
-dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environments
-venv/
 .venv/
+.venv-colab/
+venv/
 env/
-py312/
 
-# Gradio
-.gradio/
-flagged/
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Model and package caches
+.cache/
+.huggingface/
+models/
+*.pt
+*.pth
+*.safetensors
+
+# Generated audio and temporary output
+outputs/
+generated/
 gradio_cached_examples/
-
-# Generated audio
 *.wav
 *.mp3
+*.flac
+*.ogg
+*.log
 
-# Notebooks / OS / editors
+# Notebook checkpoints
 .ipynb_checkpoints/
-.DS_Store
-Thumbs.db
+
+# Editors and operating systems
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
