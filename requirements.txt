@@ -1,7 +1,9 @@
+# Python 3.10 – 3.12 only (Kokoro does not support 3.13+)
 kokoro>=0.9.4
-misaki[ja,zh]>=0.9.4
-gradio>=4.44
-langdetect>=1.0.9
-deep-translator>=1.11
-numpy
+misaki[en,ja,zh]>=0.9.4
 torch
+numpy
+gradio>=5.0
+deep-translator>=1.11.4
+langdetect>=1.0.9
+opencc-python-reimplemented>=0.1.7
