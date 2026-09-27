@@ -1,153 +1,157 @@
 #!/usr/bin/env python3
-"""
-Kokoro Multilingual TTS + Translation · Kokoro 多語言語音合成＋翻譯
+"""Kokoro multilingual speech and translation web application."""
 
-A simple Gradio web app:
-- Enter source text (ST). The language is auto-detected and read aloud.
-- Tick "Translate" to also get the target text (TT) and hear it spoken.
-- Dialogue mode: each line gets its own language and voice.
-
-Speech: Kokoro-82M (hexgrad, Apache-2.0)
-Translation: deep-translator (Google Translate)
-"""
+from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Python version check (Kokoro supports Python 3.10 – 3.12 only)
-# ---------------------------------------------------------------------------
-if not ((3, 10) <= sys.version_info[:2] <= (3, 12)):
-    sys.exit(
-        f"❌ Python {sys.version.split()[0]} detected. Kokoro needs Python 3.10–3.12.\n"
-        "   偵測到的 Python 版本不支援，Kokoro 需要 Python 3.10–3.12。\n"
-        "   Colab: see the README 'Google Colab' section (uses uv + Python 3.12)."
+if sys.version_info[:2] != (3, 12):
+    raise SystemExit(
+        "This project targets Python 3.12.\n"
+        "On Colab, run colab_setup.py first and use its Python executable."
     )
 
+import gradio as gr
 import numpy as np
 import torch
-import gradio as gr
 from deep_translator import GoogleTranslator
-from langdetect import DetectorFactory, detect_langs
-from langdetect.lang_detect_exception import LangDetectException
 from kokoro import KModel, KPipeline
+from langdetect import DetectorFactory, detect
+from langdetect.lang_detect_exception import LangDetectException
+from opencc import OpenCC
 
-# Optional: Traditional ⇄ Simplified Chinese conversion (better Mandarin G2P)
-try:
-    from opencc import OpenCC
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(message)s",
+)
+LOGGER = logging.getLogger("kokoro_app")
 
-    _T2S = OpenCC("t2s")
-    _S2T = OpenCC("s2t")
-except Exception:  # pragma: no cover
-    _T2S = None
-    _S2T = None
-
-DetectorFactory.seed = 0  # make langdetect deterministic
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-REPO_ID = "hexgrad/Kokoro-82M"
+MODEL_ID = "hexgrad/Kokoro-82M"
 SAMPLE_RATE = 24000
-AUTO = "Auto · 自動"
-LINE_PAUSE_SEC = 0.35
-MAX_CHARS_PER_REQUEST = 4500  # Google Translate limit is 5000
+MAX_TEXT_LENGTH = 12000
+AUTO = "auto"
 
-_MANDARIN_VOICES = [
-    "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi",
-    "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang",
-]
+DetectorFactory.seed = 0
+TO_SIMPLIFIED = OpenCC("t2s")
+TO_TRADITIONAL = OpenCC("s2t")
 
-# id -> info
-#   kokoro : Kokoro lang_code
-#   gt     : Google Translate target code
-#   voices : first "f" voice = default female, first "m" voice = default male
-LANGS = {
-    "en-us": {
-        "label": "English (US) 美式英文",
-        "kokoro": "a",
-        "gt": "en",
-        "voices": [
-            "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica",
-            "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
-            "am_michael", "am_adam", "am_echo", "am_eric", "am_fenrir",
-            "am_liam", "am_onyx", "am_puck", "am_santa",
-        ],
-    },
-    "en-gb": {
-        "label": "English (UK) 英式英文",
-        "kokoro": "b",
-        "gt": "en",
-        "voices": [
+
+@dataclass(frozen=True)
+class Language:
+    label: str
+    code: str
+    translation_code: str
+    voices: tuple[str, ...]
+
+
+CHINESE_VOICES = (
+    "zf_xiaobei",
+    "zf_xiaoni",
+    "zf_xiaoxiao",
+    "zf_xiaoyi",
+    "zm_yunjian",
+    "zm_yunxi",
+    "zm_yunxia",
+    "zm_yunyang",
+)
+
+LANGUAGES = {
+    "en-us": Language(
+        "English (US) · 美式英文",
+        "a",
+        "en",
+        (
+            "af_heart", "af_alloy", "af_aoede", "af_bella",
+            "af_jessica", "af_kore", "af_nicole", "af_nova",
+            "af_river", "af_sarah", "af_sky",
+            "am_michael", "am_adam", "am_echo", "am_eric",
+            "am_fenrir", "am_liam", "am_onyx", "am_puck",
+            "am_santa",
+        ),
+    ),
+    "en-gb": Language(
+        "English (UK) · 英式英文",
+        "b",
+        "en",
+        (
             "bf_emma", "bf_alice", "bf_isabella", "bf_lily",
             "bm_george", "bm_daniel", "bm_fable", "bm_lewis",
-        ],
-    },
-    "zh-tw": {
-        "label": "繁體中文 Traditional Chinese",
-        "kokoro": "z",
-        "gt": "zh-TW",
-        "voices": ["zf_xiaobei", "zm_yunxi"]
-        + [v for v in _MANDARIN_VOICES if v not in ("zf_xiaobei", "zm_yunxi")],
-    },
-    "zh-cn": {
-        "label": "简体中文 Simplified Chinese",
-        "kokoro": "z",
-        "gt": "zh-CN",
-        "voices": ["zf_xiaoxiao", "zm_yunjian"]
-        + [v for v in _MANDARIN_VOICES if v not in ("zf_xiaoxiao", "zm_yunjian")],
-    },
-    "ja": {
-        "label": "日本語 Japanese",
-        "kokoro": "j",
-        "gt": "ja",
-        "voices": ["jf_alpha", "jm_kumo", "jf_gongitsune", "jf_nezumi", "jf_tebukuro"],
-    },
-    "es": {
-        "label": "Español 西班牙文",
-        "kokoro": "e",
-        "gt": "es",
-        "voices": ["ef_dora", "em_alex", "em_santa"],
-    },
-    "fr": {
-        "label": "Français 法文",
-        "kokoro": "f",
-        "gt": "fr",
-        "voices": ["ff_siwis"],
-    },
-    "it": {
-        "label": "Italiano 義大利文",
-        "kokoro": "i",
-        "gt": "it",
-        "voices": ["if_sara", "im_nicola"],
-    },
-    "pt": {
-        "label": "Português 葡萄牙文",
-        "kokoro": "p",
-        "gt": "pt",
-        "voices": ["pf_dora", "pm_alex", "pm_santa"],
-    },
-    "hi": {
-        "label": "हिन्दी 印地文",
-        "kokoro": "h",
-        "gt": "hi",
-        "voices": ["hf_alpha", "hm_omega", "hf_beta", "hm_psi"],
-    },
+        ),
+    ),
+    "zh-tw": Language(
+        "繁體中文 · Traditional Chinese",
+        "z",
+        "zh-TW",
+        CHINESE_VOICES,
+    ),
+    "zh-cn": Language(
+        "简体中文 · Simplified Chinese",
+        "z",
+        "zh-CN",
+        (
+            "zf_xiaoxiao", "zm_yunjian",
+            *(
+                voice for voice in CHINESE_VOICES
+                if voice not in ("zf_xiaoxiao", "zm_yunjian")
+            ),
+        ),
+    ),
+    "ja": Language(
+        "日本語 · Japanese",
+        "j",
+        "ja",
+        ("jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo"),
+    ),
+    "es": Language(
+        "Español · 西班牙文",
+        "e",
+        "es",
+        ("ef_dora", "em_alex", "em_santa"),
+    ),
+    "fr": Language(
+        "Français · 法文",
+        "f",
+        "fr",
+        ("ff_siwis",),
+    ),
+    "it": Language(
+        "Italiano · 義大利文",
+        "i",
+        "it",
+        ("if_sara", "im_nicola"),
+    ),
+    "pt": Language(
+        "Português (Brasil) · 巴西葡萄牙文",
+        "p",
+        "pt",
+        ("pf_dora", "pm_alex", "pm_santa"),
+    ),
+    "hi": Language(
+        "हिन्दी · 印地文",
+        "h",
+        "hi",
+        ("hf_alpha", "hf_beta", "hm_omega", "hm_psi"),
+    ),
 }
 
-LANG_LABELS = [info["label"] for info in LANGS.values()]
-LABEL_TO_ID = {info["label"]: lid for lid, info in LANGS.items()}
-ALL_VOICES = list(dict.fromkeys(v for info in LANGS.values() for v in info["voices"]))
+LANGUAGE_CHOICES = [
+    (language.label, key)
+    for key, language in LANGUAGES.items()
+]
 
-# langdetect code -> our language id
-LANGDETECT_MAP = {
+DETECTED_LANGUAGE_MAP = {
     "en": "en-us",
-    "zh-tw": "zh-tw",
     "zh-cn": "zh-cn",
+    "zh-tw": "zh-tw",
     "ja": "ja",
     "es": "es",
     "fr": "fr",
@@ -156,377 +160,678 @@ LANGDETECT_MAP = {
     "hi": "hi",
 }
 
-_KANA = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]")
-_HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
-_DEVANAGARI = re.compile(r"[\u0900-\u097f]")
 
-# ---------------------------------------------------------------------------
-# Language detection
-# ---------------------------------------------------------------------------
-def _chinese_variant(text: str) -> str:
-    """Guess Traditional vs Simplified Chinese."""
-    if _T2S is not None and _S2T is not None:
-        if _T2S.convert(text) != text:
-            return "zh-tw"  # contains Traditional-only characters
-        if _S2T.convert(text) != text:
-            return "zh-cn"  # contains Simplified-only characters
-    try:
-        raw = detect_langs(text)[0].lang
-        if raw in ("zh-tw", "zh-cn"):
-            return raw
-    except LangDetectException:
-        pass
-    return "zh-tw"
-
-
-def detect_language(text: str):
-    """Return (language id or None, raw detected code)."""
-    t = (text or "").strip()
-    if not t:
-        return None, ""
-    if _KANA.search(t):
-        return "ja", "ja"
-    if _DEVANAGARI.search(t):
-        return "hi", "hi"
-    if _HAN.search(t):
-        return _chinese_variant(t), "zh"
-    try:
-        raw = detect_langs(t)[0].lang
-    except LangDetectException:
-        return None, ""
-    return LANGDETECT_MAP.get(raw), raw
-
-
-def resolve_language(text: str, lang_choice: str):
-    """Return (language id, human-readable note)."""
-    if lang_choice and lang_choice != AUTO:
-        lid = LABEL_TO_ID[lang_choice]
-        return lid, f"{LANGS[lid]['label']} (manual · 手動)"
-    lid, raw = detect_language(text)
-    if lid is None:
-        shown = raw or "unknown"
-        return "en-us", f"`{shown}` unsupported → English voice · 不支援，改用英文聲音"
-    return lid, f"{LANGS[lid]['label']} (auto · 自動)"
-
-
-# ---------------------------------------------------------------------------
-# Kokoro model & pipelines
-# ---------------------------------------------------------------------------
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-_MODEL = None
-_PIPELINES = {}
-
-
-def get_model():
-    global _MODEL
-    if _MODEL is None:
-        print(f"⏳ Loading Kokoro-82M on {DEVICE} (first run downloads ~330 MB)...")
-        _MODEL = KModel(repo_id=REPO_ID).to(DEVICE).eval()
-        print("✅ Kokoro model loaded.")
-    return _MODEL
-
-
-def ensure_unidic():
-    """Japanese needs the UniDic dictionary. Download it once if missing."""
-    try:
-        import unidic  # noqa: WPS433
-    except ImportError:
-        return
-    if not os.path.exists(os.path.join(unidic.DICDIR, "mecabrc")):
-        print("⏳ Downloading UniDic dictionary for Japanese (one time only)...")
-        subprocess.run([sys.executable, "-m", "unidic", "download"], check=False)
-
-
-def get_pipeline(kokoro_code: str) -> KPipeline:
-    if kokoro_code not in _PIPELINES:
-        if kokoro_code == "j":
-            ensure_unidic()
-        print(f"⏳ Creating pipeline for lang_code='{kokoro_code}'...")
-        _PIPELINES[kokoro_code] = KPipeline(
-            lang_code=kokoro_code, repo_id=REPO_ID, model=get_model()
-        )
-    return _PIPELINES[kokoro_code]
-
-
-def default_voice_pair(lang_id: str):
-    voices = LANGS[lang_id]["voices"]
-    female = next((v for v in voices if v[1] == "f"), voices[0])
-    male = next((v for v in voices if v[1] == "m"), female)
-    return female, male
-
-
-def pick_voice(lang_id: str, voice_choice: str, index: int = 0) -> str:
-    if voice_choice and voice_choice != AUTO:
-        return voice_choice
-    female, male = default_voice_pair(lang_id)
-    return female if index % 2 == 0 else male
-
-
-def synthesize(text: str, lang_id: str, voice: str, speed: float):
-    """Return a float32 numpy array (24 kHz) or None."""
+def validate_text(text: str) -> str:
     text = (text or "").strip()
+
     if not text:
-        return None
-    if lang_id == "zh-tw" and _T2S is not None:
-        text = _T2S.convert(text)  # Mandarin G2P works best with Simplified
-    pipeline = get_pipeline(LANGS[lang_id]["kokoro"])
-    chunks = []
-    for result in pipeline(text, voice=voice, speed=float(speed), split_pattern=r"\n+"):
-        audio = getattr(result, "audio", None)
-        if audio is None and isinstance(result, (tuple, list)) and len(result) >= 3:
-            audio = result[2]
-        if audio is None:
-            continue
-        if isinstance(audio, torch.Tensor):
-            audio = audio.detach().cpu().numpy()
-        chunks.append(np.asarray(audio, dtype=np.float32).reshape(-1))
-    if not chunks:
-        return None
-    return np.concatenate(chunks)
+        raise gr.Error("Enter some text first. · 請先輸入文字。")
+
+    if len(text) > MAX_TEXT_LENGTH:
+        raise gr.Error(
+            f"Maximum input length: {MAX_TEXT_LENGTH:,} characters."
+        )
+
+    return text
 
 
-def split_lines(text: str):
-    return [line.strip() for line in (text or "").splitlines() if line.strip()]
+def split_text(text: str, limit: int):
+    """Split at nearby punctuation or whitespace, with a hard size limit."""
+    text = text.strip()
+
+    while text:
+        if len(text) <= limit:
+            yield text
+            break
+
+        window = text[:limit]
+        boundaries = [
+            match.end()
+            for match in re.finditer(r"[\s.!?。！？；;，,]", window)
+        ]
+
+        cut = boundaries[-1] if boundaries else limit
+        if cut < limit // 3:
+            cut = limit
+
+        piece = text[:cut].strip()
+        if piece:
+            yield piece
+
+        text = text[cut:].lstrip()
 
 
-def speak_text(text: str, lang_choice: str, voice_choice: str, speed: float, dialogue: bool):
-    """Return ((sample_rate, audio) or None, list of markdown notes)."""
-    lines = split_lines(text) if dialogue else [text.strip()]
-    pause = np.zeros(int(SAMPLE_RATE * LINE_PAUSE_SEC), dtype=np.float32)
-    pieces, notes = [], []
+def resolve_language(text: str, selected: str):
+    """Return an available speech language and an explanatory note."""
+    if selected != AUTO:
+        return selected, LANGUAGES[selected].label
 
-    for i, line in enumerate(lines):
-        if not line:
-            continue
-        lang_id, lang_note = resolve_language(line, lang_choice)
-        voice = pick_voice(lang_id, voice_choice, i if dialogue else 0)
-        prefix = f"Line {i + 1} · 第 {i + 1} 行: " if dialogue else ""
-        try:
-            audio = synthesize(line, lang_id, voice, speed)
-        except Exception as e:  # keep going with the other lines
-            notes.append(f"- {prefix}⚠️ {lang_note} · `{voice}` — error: {e}")
-            continue
-        if audio is None:
-            notes.append(f"- {prefix}⚠️ {lang_note} · `{voice}` — no audio · 無語音")
-            continue
-        if pieces:
-            pieces.append(pause)
-        pieces.append(audio)
-        notes.append(f"- {prefix}{lang_note} · voice 聲音 `{voice}`")
-
-    if not pieces:
-        return None, notes
-    return (SAMPLE_RATE, np.concatenate(pieces)), notes
-
-
-# ---------------------------------------------------------------------------
-# Translation
-# ---------------------------------------------------------------------------
-def _translate_once(translator: GoogleTranslator, text: str, retries: int = 3) -> str:
-    last_error = None
-    for attempt in range(retries):
-        try:
-            out = translator.translate(text)
-            return out if out is not None else ""
-        except Exception as e:
-            last_error = e
-            time.sleep(1.5 * (attempt + 1))
-    raise RuntimeError(str(last_error))
-
-
-def _chunk_text(text: str, limit: int = MAX_CHARS_PER_REQUEST):
-    """Group lines into chunks under the request size limit."""
-    chunks, current = [], ""
-    for line in text.splitlines():
-        while len(line) > limit:  # extremely long single line
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks.append(line[:limit])
-            line = line[limit:]
-        candidate = f"{current}\n{line}" if current else line
-        if len(candidate) > limit:
-            chunks.append(current)
-            current = line
-        else:
-            current = candidate
-    if current.strip():
-        chunks.append(current)
-    return [c for c in chunks if c.strip()]
-
-
-def translate_text(text: str, target_id: str, dialogue: bool) -> str:
-    translator = GoogleTranslator(source="auto", target=LANGS[target_id]["gt"])
-    if dialogue:
-        # Translate line by line so each line stays aligned
-        return "\n".join(_translate_once(translator, line) for line in split_lines(text))
-    return "\n".join(_translate_once(translator, chunk) for chunk in _chunk_text(text.strip()))
-
-
-# ---------------------------------------------------------------------------
-# Gradio handlers
-# ---------------------------------------------------------------------------
-def _section(title: str, notes):
-    return f"**{title}**\n\n" + ("\n".join(notes) if notes else "- (none)")
-
-
-def on_generate(st, src_lang, src_voice, speed, do_translate, tgt_lang, tgt_voice, dialogue):
-    st = (st or "").strip()
-    if not st:
-        raise gr.Error("Please enter source text. · 請輸入原文。")
-
-    sections = []
-    try:
-        src_audio, notes = speak_text(st, src_lang, src_voice, speed, dialogue)
-    except Exception as e:
-        raise gr.Error(f"Speech failed · 語音生成失敗: {e}")
-    sections.append(_section("🅰️ Source speech (ST) · 原文語音", notes))
-
-    tt_text, tt_audio = "", None
-    if do_translate:
-        target_id = LABEL_TO_ID[tgt_lang]
-        try:
-            tt_text = translate_text(st, target_id, dialogue)
-        except Exception as e:
-            gr.Warning("Translation failed. Check internet / wait and retry. · 翻譯失敗，請檢查網路或稍候再試。")
-            sections.append(f"⚠️ **Translation failed · 翻譯失敗:** {e}")
-            return src_audio, "", None, "\n\n".join(sections)
-
-        if tt_text.strip():
-            try:
-                tt_audio, notes = speak_text(tt_text, tgt_lang, tgt_voice, speed, dialogue)
-            except Exception as e:
-                notes = [f"- ⚠️ error: {e}"]
-            sections.append(_section("🅱️ Translation speech (TT) · 譯文語音", notes))
-
-    return src_audio, tt_text, tt_audio, "\n\n".join(sections)
-
-
-def on_speak_edited(tt, tgt_lang, tgt_voice, speed, dialogue):
-    tt = (tt or "").strip()
-    if not tt:
-        raise gr.Error("The translation box is empty. · 譯文是空的。")
-    try:
-        tt_audio, notes = speak_text(tt, tgt_lang, tgt_voice, speed, dialogue)
-    except Exception as e:
-        raise gr.Error(f"Speech failed · 語音生成失敗: {e}")
-    return tt_audio, _section("🔁 Edited translation speech · 修改後譯文語音", notes)
-
-
-def update_src_voices(lang_choice):
-    if not lang_choice or lang_choice == AUTO:
-        choices = [AUTO] + ALL_VOICES
+    # Kana is a strong hint for Japanese. Otherwise prefer statistical
+    # detection; Unicode blocks alone do not uniquely identify a language.
+    if re.search(r"[\u3040-\u30ff\uff66-\uff9f]", text):
+        detected = "ja"
     else:
-        choices = [AUTO] + LANGS[LABEL_TO_ID[lang_choice]]["voices"]
-    return gr.update(choices=choices, value=AUTO)
+        try:
+            detected = detect(text)
+        except LangDetectException:
+            detected = "unknown"
+
+    if detected in ("zh-cn", "zh-tw"):
+        if TO_SIMPLIFIED.convert(text) != text:
+            detected = "zh-tw"
+        elif TO_TRADITIONAL.convert(text) != text:
+            detected = "zh-cn"
+
+    language = DETECTED_LANGUAGE_MAP.get(detected)
+
+    if language is None:
+        return (
+            "en-us",
+            f"Detected {detected}: unsupported for native speech; "
+            "using an English voice.",
+        )
+
+    return language, f"{LANGUAGES[language].label} [auto]"
 
 
-def update_tgt_voices(lang_choice):
-    choices = [AUTO] + LANGS[LABEL_TO_ID[lang_choice]]["voices"]
-    return gr.update(choices=choices, value=AUTO)
+def voice_choices(language: str):
+    if language == AUTO:
+        voices = sorted({
+            voice
+            for item in LANGUAGES.values()
+            for voice in item.voices
+        })
+    else:
+        voices = list(LANGUAGES[language].voices)
+
+    return [("Auto · 自動", AUTO)] + [(voice, voice) for voice in voices]
 
 
-# ---------------------------------------------------------------------------
-# UI
-# ---------------------------------------------------------------------------
-DESCRIPTION = """
-# 🎙️ Kokoro Multilingual TTS + Translation · Kokoro 多語言語音合成＋翻譯
-
-Enter **source text (ST)**: the language is auto-detected and read aloud. Tick **🌍 Translate** to get the **target text (TT)** and hear it too.
-輸入**原文（ST）**，系統會自動偵測語言並朗讀；勾選 **🌍 翻譯** 即可產生**譯文（TT）**並朗讀。
-
-💬 **Dialogue mode · 對話模式**: one sentence per line; each line gets its own language and voice (Auto voices alternate female / male).
-每行一句，各行自動偵測語言與聲音（自動聲音會女聲／男聲交替）。
-"""
-
-EXAMPLES = [
-    ["Hello! Welcome to the Kokoro multilingual text-to-speech demo.", False],
-    ["今天天氣很好，我們一起去公園散步吧。", False],
-    ["こんにちは、今日はいい天気ですね。", False],
-    ["Good morning! How are you today?\n我很好，謝謝！你呢？\nI'm great, thanks for asking.", True],
-    ["Bonjour tout le monde, comment allez-vous ?", False],
-]
+def refresh_voices(language: str):
+    return gr.Dropdown(
+        choices=voice_choices(language),
+        value=AUTO,
+    )
 
 
-def build_ui():
-    with gr.Blocks(title="Kokoro Multilingual TTS + Translation") as demo:
-        gr.Markdown(DESCRIPTION)
+def choose_voice(language: str, requested: str, index: int):
+    available = LANGUAGES[language].voices
+
+    if requested != AUTO and requested in available:
+        return requested, ""
+
+    female = next(
+        (voice for voice in available if voice[1] == "f"),
+        available[0],
+    )
+    male = next(
+        (voice for voice in available if voice[1] == "m"),
+        female,
+    )
+
+    note = ""
+    if requested != AUTO:
+        note = f"Voice {requested} does not match this language; used Auto."
+
+    return (female if index % 2 == 0 else male), note
+
+
+def ensure_japanese_dictionary():
+    import unidic
+
+    dictionary = Path(unidic.DICDIR) / "mecabrc"
+
+    if not dictionary.exists():
+        LOGGER.info("Downloading the Japanese UniDic dictionary...")
+        subprocess.run(
+            [sys.executable, "-m", "unidic", "download"],
+            check=True,
+        )
+
+    if not dictionary.exists():
+        raise RuntimeError(
+            "Japanese dictionary is missing. "
+            "Run: python -m unidic download"
+        )
+
+
+class SpeechEngine:
+    def __init__(self, device: str):
+        self.device = device
+        self.model = None
+        self.pipelines = {}
+        self.lock = threading.RLock()
+
+    def pipeline(self, language: str):
+        code = LANGUAGES[language].code
+
+        if code in self.pipelines:
+            return self.pipelines[code]
+
+        if code == "j":
+            ensure_japanese_dictionary()
+
+        if self.model is None:
+            LOGGER.info("Loading %s on %s", MODEL_ID, self.device)
+            self.model = KModel(repo_id=MODEL_ID).to(self.device).eval()
+
+        self.pipelines[code] = KPipeline(
+            lang_code=code,
+            repo_id=MODEL_ID,
+            model=self.model,
+        )
+        return self.pipelines[code]
+
+    def non_english_audio(self, pipeline, text, voice, speed):
+        """Split again if phonemization exceeds the model input limit."""
+        phonemes, _ = pipeline.g2p(text)
+
+        if not phonemes:
+            return
+
+        if len(phonemes) > 500:
+            if len(text) <= 1:
+                raise RuntimeError(
+                    "A single character produced too many phonemes."
+                )
+
+            middle = len(text) // 2
+            left_space = text.rfind(" ", 0, middle + 1)
+            if left_space > len(text) // 4:
+                middle = left_space
+
+            yield from self.non_english_audio(
+                pipeline, text[:middle].strip(), voice, speed
+            )
+            yield from self.non_english_audio(
+                pipeline, text[middle:].strip(), voice, speed
+            )
+            return
+
+        for result in pipeline.generate_from_tokens(
+            phonemes,
+            voice=voice,
+            speed=speed,
+        ):
+            if result.audio is not None:
+                yield result.audio
+
+    def speak(
+        self,
+        text: str,
+        selected_language: str,
+        selected_voice: str,
+        speed: float,
+        dialogue: bool,
+        pause: float,
+    ):
+        text = validate_text(text)
+
+        lines = (
+            [line.strip() for line in text.splitlines() if line.strip()]
+            if dialogue
+            else [text]
+        )
+
+        segments = []
+        notes = []
+
+        with self.lock, torch.inference_mode():
+            for index, line in enumerate(lines):
+                language, language_note = resolve_language(
+                    line, selected_language
+                )
+                voice, voice_note = choose_voice(
+                    language,
+                    selected_voice,
+                    index if dialogue else 0,
+                )
+
+                pipeline = self.pipeline(language)
+                spoken_text = (
+                    TO_SIMPLIFIED.convert(line)
+                    if LANGUAGES[language].code == "z"
+                    else line
+                )
+
+                line_segments = []
+
+                for chunk in split_text(spoken_text, 180):
+                    if LANGUAGES[language].code in ("a", "b"):
+                        audio_iterator = (
+                            result.audio
+                            for result in pipeline(
+                                chunk,
+                                voice=voice,
+                                speed=float(speed),
+                                split_pattern=None,
+                            )
+                            if result.audio is not None
+                        )
+                    else:
+                        audio_iterator = self.non_english_audio(
+                            pipeline, chunk, voice, float(speed)
+                        )
+
+                    for audio in audio_iterator:
+                        if isinstance(audio, torch.Tensor):
+                            audio = audio.detach().float().cpu().numpy()
+
+                        audio = np.asarray(
+                            audio, dtype=np.float32
+                        ).reshape(-1)
+
+                        if audio.size:
+                            line_segments.append(audio)
+
+                if line_segments:
+                    if segments and pause > 0:
+                        segments.append(
+                            np.zeros(
+                                int(SAMPLE_RATE * pause),
+                                dtype=np.float32,
+                            )
+                        )
+
+                    segments.extend(line_segments)
+                else:
+                    notes.append(f"Line {index + 1}: no speech generated.")
+
+                notes.append(
+                    f"Line {index + 1}: {language_note}; voice={voice}"
+                )
+                if voice_note:
+                    notes.append(voice_note)
+
+        if not segments:
+            raise RuntimeError(
+                "No audio was generated. Try a full sentence and "
+                "select its language manually."
+            )
+
+        waveform = np.concatenate(segments).astype(np.float32)
+        waveform = np.nan_to_num(waveform)
+        waveform = np.clip(waveform, -1.0, 1.0)
+
+        return (SAMPLE_RATE, waveform), notes
+
+
+def translate_text(text: str, source: str, target: str) -> str:
+    source_code = (
+        "auto"
+        if source == AUTO
+        else LANGUAGES[source].translation_code
+    )
+    target_code = LANGUAGES[target].translation_code
+
+    translator = GoogleTranslator(
+        source=source_code,
+        target=target_code,
+    )
+
+    translated_lines = []
+
+    # Preserve line boundaries for dialogue.
+    for line in text.splitlines():
+        if not line.strip():
+            translated_lines.append("")
+            continue
+
+        translated_chunks = []
+
+        for chunk in split_text(line, 4000):
+            for attempt in range(3):
+                try:
+                    translated = translator.translate(chunk)
+                    if not translated:
+                        raise RuntimeError(
+                            "Translation service returned empty text."
+                        )
+                    translated_chunks.append(translated)
+                    break
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    time.sleep(1.5 * (attempt + 1))
+
+        translated_lines.append(" ".join(translated_chunks))
+
+    result = "\n".join(translated_lines)
+
+    if target == "zh-tw":
+        result = TO_TRADITIONAL.convert(result)
+    elif target == "zh-cn":
+        result = TO_SIMPLIFIED.convert(result)
+
+    return result
+
+
+def build_app(engine: SpeechEngine):
+    hardware = (
+        torch.cuda.get_device_name(0)
+        if engine.device == "cuda"
+        else "CPU"
+    )
+
+    def generate(
+        source_text,
+        source_language,
+        source_voice,
+        should_translate,
+        target_language,
+        target_voice,
+        speed,
+        dialogue,
+        pause,
+    ):
+        source_text = validate_text(source_text)
+        started = time.perf_counter()
+
+        source_audio = None
+        target_audio = None
+        translated = ""
+        messages = [f"Device: {hardware}"]
+
+        try:
+            source_audio, notes = engine.speak(
+                source_text,
+                source_language,
+                source_voice,
+                speed,
+                dialogue,
+                pause,
+            )
+            messages.extend(["SOURCE SPEECH", *notes])
+        except Exception as exc:
+            LOGGER.exception("Source speech failed")
+            messages.append(f"Source speech failed: {exc}")
+
+        if should_translate:
+            try:
+                translated = translate_text(
+                    source_text,
+                    source_language,
+                    target_language,
+                )
+            except Exception as exc:
+                LOGGER.exception("Translation failed")
+                messages.append(f"Translation failed: {exc}")
+
+            if translated:
+                try:
+                    target_audio, notes = engine.speak(
+                        translated,
+                        target_language,
+                        target_voice,
+                        speed,
+                        dialogue,
+                        pause,
+                    )
+                    messages.extend(["TRANSLATION SPEECH", *notes])
+                except Exception as exc:
+                    LOGGER.exception("Translation speech failed")
+                    messages.append(f"Translation speech failed: {exc}")
+
+        elapsed = time.perf_counter() - started
+        messages.append(f"Elapsed: {elapsed:.1f} seconds")
+
+        return (
+            source_audio,
+            translated,
+            target_audio,
+            "\n".join(messages),
+        )
+
+    def speak_edited(text, language, voice, speed, dialogue, pause):
+        text = validate_text(text)
+
+        try:
+            audio, notes = engine.speak(
+                text, language, voice, speed, dialogue, pause
+            )
+            return audio, "\n".join([f"Device: {hardware}", *notes])
+        except Exception as exc:
+            LOGGER.exception("Edited translation speech failed")
+            return None, f"Speech failed: {exc}"
+
+    with gr.Blocks(
+        title="Kokoro Multilingual TTS",
+        delete_cache=(3600, 3600),
+    ) as demo:
+        gr.Markdown(
+            "# 🎙️ Kokoro Multilingual TTS + Translation\n"
+            "## 多語言語音合成＋翻譯\n"
+            f"**Device / 執行裝置:** {hardware}\n\n"
+            "Enter text, generate speech, optionally translate, "
+            "then edit and replay the translation."
+        )
+
+        gr.Markdown(
+            "**Privacy / 隱私:** When Translate is enabled, your source "
+            "text is sent to an external translation service. "
+            "Do not submit confidential information.\n\n"
+            "勾選翻譯時，原文會傳送至外部翻譯服務，請勿輸入機密資料。"
+        )
+
+        source_text = gr.Textbox(
+            label="Source text (ST) · 原文",
+            lines=7,
+            placeholder=(
+                "Hello! Welcome to our multilingual demo.\n"
+                "你好，歡迎使用多語言語音合成。\n"
+                "こんにちは。"
+            ),
+        )
 
         with gr.Row():
-            with gr.Column(scale=3):
-                st = gr.Textbox(
-                    label="Source text (ST) · 原文",
-                    lines=8,
-                    placeholder="Type or paste text here… · 在此輸入或貼上文字…",
-                )
-                dialogue = gr.Checkbox(
-                    label="💬 Dialogue mode (one line per sentence) · 對話模式（每行一句）",
-                    value=False,
-                )
-            with gr.Column(scale=2):
-                src_lang = gr.Dropdown(
-                    [AUTO] + LANG_LABELS, value=AUTO, label="Source language · 原文語言"
-                )
-                src_voice = gr.Dropdown(
-                    [AUTO] + ALL_VOICES, value=AUTO, label="Source voice · 原文聲音"
-                )
-                speed = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label="Speed · 語速")
-                do_translate = gr.Checkbox(label="🌍 Translate · 翻譯", value=False)
-                tgt_lang = gr.Dropdown(
-                    LANG_LABELS,
-                    value=LANGS["en-us"]["label"],
-                    label="Target language · 目標語言",
-                )
-                tgt_voice = gr.Dropdown(
-                    [AUTO] + LANGS["en-us"]["voices"],
-                    value=AUTO,
-                    label="Translation voice · 譯文聲音",
-                )
+            source_language = gr.Dropdown(
+                choices=[("Auto · 自動", AUTO)] + LANGUAGE_CHOICES,
+                value=AUTO,
+                label="Source language · 原文語言",
+            )
+            source_voice = gr.Dropdown(
+                choices=voice_choices(AUTO),
+                value=AUTO,
+                label="Source voice · 原文聲音",
+            )
 
-        gen_btn = gr.Button("🔊 Generate · 生成", variant="primary")
-        status = gr.Markdown()
+        with gr.Row():
+            should_translate = gr.Checkbox(
+                value=False,
+                label="🌍 Translate · 翻譯",
+            )
+            dialogue = gr.Checkbox(
+                value=False,
+                label="Dialogue: one turn per line · 對話模式",
+            )
 
-        src_audio = gr.Audio(
-            label="🅰️ Source speech (ST) · 原文語音", type="numpy", interactive=False
+        with gr.Row():
+            target_language = gr.Dropdown(
+                choices=LANGUAGE_CHOICES,
+                value="zh-tw",
+                label="Target language · 目標語言",
+            )
+            target_voice = gr.Dropdown(
+                choices=voice_choices("zh-tw"),
+                value=AUTO,
+                label="Translation voice · 譯文聲音",
+            )
+
+        with gr.Row():
+            speed = gr.Slider(
+                minimum=0.5,
+                maximum=2.0,
+                step=0.05,
+                value=1.0,
+                label="Speech speed · 語速",
+            )
+            pause = gr.Slider(
+                minimum=0.0,
+                maximum=1.5,
+                step=0.05,
+                value=0.35,
+                label="Dialogue line pause (seconds) · 對話停頓",
+            )
+
+        generate_button = gr.Button(
+            "🔊 Generate · 生成",
+            variant="primary",
         )
-        tt = gr.Textbox(
-            label="🅱️ Translation text (TT) · 譯文 (editable · 可編輯)", lines=6
-        )
-        re_btn = gr.Button("🔁 Speak edited translation · 朗讀修改後的譯文")
-        tt_audio = gr.Audio(
-            label="🅱️ Translation speech (TT) · 譯文語音", type="numpy", interactive=False
+
+        source_audio = gr.Audio(
+            label="Source speech (ST) · 原文語音",
+            format="wav",
+            interactive=False,
         )
 
-        gr.Examples(examples=EXAMPLES, inputs=[st, dialogue], label="Examples · 範例")
-
-        src_lang.change(update_src_voices, inputs=src_lang, outputs=src_voice)
-        tgt_lang.change(update_tgt_voices, inputs=tgt_lang, outputs=tgt_voice)
-
-        gen_btn.click(
-            on_generate,
-            inputs=[st, src_lang, src_voice, speed, do_translate, tgt_lang, tgt_voice, dialogue],
-            outputs=[src_audio, tt, tt_audio, status],
+        translated_text = gr.Textbox(
+            label="Editable translation (TT) · 可編輯譯文",
+            lines=7,
+            interactive=True,
         )
-        re_btn.click(
-            on_speak_edited,
-            inputs=[tt, tgt_lang, tgt_voice, speed, dialogue],
-            outputs=[tt_audio, status],
+
+        edited_button = gr.Button(
+            "🔁 Speak edited translation · 朗讀修改後的譯文"
+        )
+
+        target_audio = gr.Audio(
+            label="Translation speech (TT) · 譯文語音",
+            format="wav",
+            interactive=False,
+        )
+
+        status = gr.Textbox(
+            label="Status · 執行狀態",
+            lines=8,
+            interactive=False,
+        )
+
+        gr.Markdown(
+            "Auto language detection can be wrong, especially for "
+            "short text. Select the language manually when necessary.\n\n"
+            "Dialogue Auto voices alternate female/male where both "
+            "are available. French has only one voice in this app."
+        )
+
+        source_language.change(
+            fn=refresh_voices,
+            inputs=source_language,
+            outputs=source_voice,
+            queue=False,
+        )
+
+        target_language.change(
+            fn=refresh_voices,
+            inputs=target_language,
+            outputs=target_voice,
+            queue=False,
+        )
+
+        generate_button.click(
+            fn=generate,
+            inputs=[
+                source_text,
+                source_language,
+                source_voice,
+                should_translate,
+                target_language,
+                target_voice,
+                speed,
+                dialogue,
+                pause,
+            ],
+            outputs=[
+                source_audio,
+                translated_text,
+                target_audio,
+                status,
+            ],
+            concurrency_id="speech",
+            concurrency_limit=1,
+        )
+
+        edited_button.click(
+            fn=speak_edited,
+            inputs=[
+                translated_text,
+                target_language,
+                target_voice,
+                speed,
+                dialogue,
+                pause,
+            ],
+            outputs=[target_audio, status],
+            concurrency_id="speech",
+            concurrency_limit=1,
         )
 
     return demo
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Kokoro Multilingual TTS + Translation")
-    parser.add_argument("--share", action="store_true", help="Create a public share link")
-    parser.add_argument("--host", default="127.0.0.1", help="Server host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=7860, help="Server port (default: 7860)")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--share", action="store_true")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7860)
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cuda", "cpu"),
+        default="auto",
+    )
     args = parser.parse_args()
 
-    get_model()  # load once at startup so the first click is faster
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
 
-    demo = build_ui()
-    demo.queue().launch(server_name=args.host, server_port=args.port, share=args.share)
+    if device == "cuda" and not torch.cuda.is_available():
+        raise SystemExit(
+            "CUDA is unavailable. Select a GPU runtime and "
+            "run colab_setup.py, or use --device cpu."
+        )
+
+    if device == "cuda":
+        # Exercise CUDA rather than only checking device visibility.
+        probe = torch.ones(4, device="cuda")
+        assert (probe + probe).sum().item() == 8
+        torch.cuda.synchronize()
+        del probe
+
+    username = os.getenv("GRADIO_USERNAME")
+    password = os.getenv("GRADIO_PASSWORD")
+
+    if bool(username) != bool(password):
+        raise SystemExit(
+            "Set both GRADIO_USERNAME and GRADIO_PASSWORD, or neither."
+        )
+
+    authentication = (username, password) if username else None
+
+    if args.share and authentication is None:
+        LOGGER.warning(
+            "Public sharing enabled without authentication. "
+            "Anyone with the link can submit jobs."
+        )
+
+    LOGGER.info(
+        "Python=%s | Torch=%s | CUDA runtime=%s | Device=%s",
+        sys.version.split()[0],
+        torch.__version__,
+        torch.version.cuda,
+        device,
+    )
+
+    engine = SpeechEngine(device)
+    demo = build_app(engine)
+    demo.queue(max_size=8, default_concurrency_limit=1)
+    demo.launch(
+        server_name=args.host,
+        server_port=args.port,
+        share=args.share,
+        auth=authentication,
+        show_error=False,
+    )
 
 
 if __name__ == "__main__":
