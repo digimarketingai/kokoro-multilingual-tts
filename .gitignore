@@ -1,8 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
 venv/
 .venv/
-__pycache__/
-*.pyc
+env/
+py312/
+
+# Gradio
 .gradio/
 flagged/
+gradio_cached_examples/
+
+# Generated audio
 *.wav
+*.mp3
+
+# Notebooks / OS / editors
+.ipynb_checkpoints/
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
