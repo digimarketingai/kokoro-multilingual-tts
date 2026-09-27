@@ -1,156 +1,359 @@
-# 🎙️ Kokoro Multilingual TTS + Translation · Kokoro 多語言語音合成＋翻譯
+# 🎙️ Kokoro Multilingual TTS + Translation
 
-A simple Gradio web app. Enter **source text (ST)** and it **auto-detects the language** and reads it aloud. Tick **Translate** to also get the **target text (TT)** and hear it spoken. Speech is powered by [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). The interface is bilingual (Traditional Chinese / English).
+多語言語音合成＋翻譯，支援 Google Colab GPU 與本機執行。
 
-一個簡單的 Gradio 網頁工具：輸入**原文（ST）**，系統會**自動偵測語言**並朗讀；勾選「翻譯」即可產生**譯文（TT）**並朗讀譯文。語音使用 [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) 模型，介面為繁體中文／英文雙語。
+A bilingual Gradio application for:
 
-## ✨ Features · 功能
+- Source text-to-speech
+- Automatic language detection
+- Optional translation and translated speech
+- Editing and replaying translations
+- Dialogue with one turn per line
+- Manual language and voice selection
+- Adjustable speech speed
+- WAV audio playback and download
+- CUDA acceleration when available
 
-- 🌐 **Auto language detection** · 自動偵測語言
-- 🌍 **Translation (ST → TT)** with speech for both · **翻譯（原文 → 譯文）**，原文與譯文皆可朗讀
-- ✏️ **Edit the translation** and hear it again · **可編輯譯文**並重新朗讀
-- 💬 **Dialogue mode**: each line gets its own language and voice · **對話模式**：每行各自偵測語言與聲音
-- 🎚️ Choose language, voice, and speed manually · 可手動選擇語言、聲音、語速
-- 🆓 Free, open-weight, runs locally or on Google Colab · 免費開源，可在本機或 Google Colab 執行
-- 🔗 Optional public share link · 可選擇建立公開分享連結
+## Supported speech languages
 
-## 🗣️ Supported languages · 支援語言
+| Language | Example voices |
+|---|---|
+| American English | af_heart, am_michael |
+| British English | bf_emma, bm_george |
+| Traditional Chinese, spoken as Mandarin | zf_xiaobei, zm_yunxi |
+| Simplified Chinese, spoken as Mandarin | zf_xiaoxiao, zm_yunjian |
+| Japanese | jf_alpha, jm_kumo |
+| Spanish | ef_dora, em_alex |
+| French | ff_siwis |
+| Italian | if_sara, im_nicola |
+| Brazilian Portuguese | pf_dora, pm_alex |
+| Hindi | hf_alpha, hm_omega |
 
-| Language 語言 | Speech 語音 | Translation target 翻譯目標 | Example voices 聲音範例 |
-|---|---|---|---|
-| English (US) 美式英文 | ✅ | ✅ | `af_heart`, `am_michael` |
-| English (UK) 英式英文 | ✅ | ✅ | `bf_emma`, `bm_george` |
-| 繁體中文 Traditional Chinese | ✅ (Mandarin 普通話) | ✅ | `zf_xiaobei`, `zm_yunxi` |
-| 简体中文 Simplified Chinese | ✅ (Mandarin 普通話) | ✅ | `zf_xiaoxiao`, `zm_yunjian` |
-| 日本語 Japanese | ✅ | ✅ | `jf_alpha`, `jm_kumo` |
-| Español 西班牙文 | ✅ | ✅ | `ef_dora`, `em_alex` |
-| Français 法文 | ✅ | ✅ | `ff_siwis` |
-| Italiano 義大利文 | ✅ | ✅ | `if_sara`, `im_nicola` |
-| Português 葡萄牙文 | ✅ | ✅ | `pf_dora`, `pm_alex` |
-| हिन्दी 印地文 | ✅ | ✅ | `hf_alpha`, `hm_omega` |
+Traditional and Simplified Chinese are writing variants, not separate
+spoken-language models.
 
-The source text can be in almost any language when translating. Only speech is limited to the list above. Unsupported source languages are read with an English voice.
-翻譯時原文幾乎可以是任何語言，只有語音受上表限制；不支援的原文語言會以英文聲音朗讀。
+Unsupported source languages use an English voice as a fallback.
+This does not provide native pronunciation for unsupported languages.
+Translation can still work when the translation service supports the
+source language.
 
-## 🚀 Quick Start · 快速開始
+## Project files
 
-**Requirements · 需求:** **Python 3.10 – 3.12** (3.13+ is not supported by Kokoro · Kokoro 不支援 3.13 以上), Git, internet (for translation · 翻譯需要網路)
+```text
+.
+├── app.py
+├── requirements.txt
+├── colab_setup.py
+├── README.md
+├── .gitignore
+└── LICENSE
+```
 
-### 1. Clone · 下載專案
+## Google Colab with T4 GPU
+
+First commit all project files to GitHub.
+
+1. Create a Colab notebook.
+2. Select Runtime > Change runtime type.
+3. Select T4 GPU if available.
+4. Run the following setup cell.
+
+### Cell 1: clone and install
+
+```python
+import pathlib
+import subprocess
+import sys
+
+REPOSITORY = "https://github.com/digimarketingai/kokoro-multilingual-tts.git"
+PROJECT = pathlib.Path("/content/kokoro-multilingual-tts")
+
+if not PROJECT.exists():
+    subprocess.run(
+        ["git", "clone", REPOSITORY, str(PROJECT)],
+        check=True,
+    )
+else:
+    print("Using existing project directory.")
+    print("Existing files will not be deleted or overwritten.")
+
+installer = PROJECT / "colab_setup.py"
+if not installer.exists():
+    raise RuntimeError(
+        "colab_setup.py is missing. Upload/commit the replacement "
+        "project files before running this notebook."
+    )
+
+subprocess.run(
+    [sys.executable, str(installer)],
+    check=True,
+)
+```
+
+### Cell 2: launch
+
+```python
+import os
+import pathlib
+import subprocess
+from getpass import getpass
+
+PROJECT = pathlib.Path("/content/kokoro-multilingual-tts")
+PYTHON = PROJECT / ".venv-colab/bin/python"
+
+environment = os.environ.copy()
+environment["GRADIO_USERNAME"] = "kokoro"
+environment["GRADIO_PASSWORD"] = getpass(
+    "Choose a password for the shared app: "
+)
+
+if not environment["GRADIO_PASSWORD"]:
+    raise ValueError("A non-empty password is required.")
+
+subprocess.run(
+    [
+        str(PYTHON),
+        str(PROJECT / "app.py"),
+        "--device",
+        "cuda",
+        "--share",
+    ],
+    cwd=PROJECT,
+    env=environment,
+    check=True,
+)
+```
+
+Open the Gradio share URL printed by the launch cell.
+
+Login username: `kokoro`
+
+Login password: the password entered in the cell.
+
+The launch cell remains running while the application is active.
+Stop the cell to stop the application.
+
+The notebook kernel does not need to use Python 3.12.
+The app runs using its own Python 3.12 executable.
+
+GPU allocation and runtime duration are controlled by Colab.
+Free runtimes may terminate workloads used mainly through a web UI.
+This is not a permanent hosting deployment.
+
+## Local installation
+
+This project targets Python 3.12.
+
+### Ubuntu / Debian system dependencies
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  espeak-ng libespeak-ng1 libsndfile1 \
+  build-essential cmake pkg-config
+```
+
+### Create a virtual environment
 
 ```bash
 git clone https://github.com/digimarketingai/kokoro-multilingual-tts.git
 cd kokoro-multilingual-tts
+
+python3.12 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip setuptools wheel
 ```
 
-### 2. Create & activate a Python 3.12 virtual environment · 建立並啟用 Python 3.12 虛擬環境
+### NVIDIA GPU installation
 
-**Windows:**
+Requires an NVIDIA GPU and a compatible driver.
+
 ```bash
-py -3.12 -m venv venv
-venv\Scripts\activate
+python -m pip install torch==2.8.0 \
+  --index-url https://download.pytorch.org/whl/cu126
+
+python -m pip install -r requirements.txt
+python -m pip check
+python app.py --device cuda
 ```
 
-**macOS / Linux:**
+### CPU installation
+
 ```bash
-python3.12 -m venv venv
-source venv/bin/activate
+python -m pip install torch==2.8.0 \
+  --index-url https://download.pytorch.org/whl/cpu
+
+python -m pip install -r requirements.txt
+python -m pip check
+python app.py --device cpu
 ```
 
-### 3. Install · 安裝套件
+Open:
 
-```bash
-pip install -r requirements.txt
+```text
+http://127.0.0.1:7860
 ```
 
-Install **espeak-ng** too. Kokoro uses it for words it doesn't know · 另請安裝 **espeak-ng**（Kokoro 遇到不認識的字時會用到）:
-
-| OS 系統 | Command 指令 |
-|---|---|
-| Ubuntu / Debian | `sudo apt-get install espeak-ng` |
-| macOS | `brew install espeak-ng` |
-| Windows | Download the `.msi` from [espeak-ng releases](https://github.com/espeak-ng/espeak-ng/releases) · 下載 `.msi` 安裝檔 |
-
-### 4. Run · 執行
+For Japanese, the app downloads UniDic when first needed.
+You can also install it in advance:
 
 ```bash
-python app.py
+python -m unidic download
 ```
 
-Open **http://127.0.0.1:7860** in your browser. · 在瀏覽器開啟 **http://127.0.0.1:7860**。
+## Usage
 
-Create a public link · 建立公開連結:
+1. Enter source text.
+2. Choose a language or leave it on Auto.
+3. Choose a voice or leave it on Auto.
+4. Optionally enable Translate.
+5. Select the target language and translation voice.
+6. Click Generate.
+7. Edit the translation if necessary.
+8. Click Speak edited translation.
+
+For multilingual dialogue:
+
+- Enable Dialogue.
+- Put one turn per line.
+- Leave source language on Auto for per-line detection.
+- Leave voice on Auto for alternating female/male voices.
+
+If the selected language has no male voice, the available voice is reused.
+
+Without Dialogue, the input is treated as one language.
+For mixed-language paragraphs, separate languages into dialogue lines.
+
+## Command-line arguments
+
+| Argument | Default | Purpose |
+|---|---|---|
+| --device | auto | auto, cuda, or cpu |
+| --share | off | Create a Gradio public share link |
+| --host | 127.0.0.1 | Bind address |
+| --port | 7860 | Server port |
+
+Examples:
+
 ```bash
+python app.py --device cuda
+python app.py --device cpu --port 7861
+python app.py --device cuda --share
+```
+
+## Authentication
+
+Set both environment variables before launching:
+
+```bash
+export GRADIO_USERNAME="kokoro"
+read -s -p "Password: " GRADIO_PASSWORD
+export GRADIO_PASSWORD
+echo
+
 python app.py --share
 ```
 
-## ☁️ Google Colab
+Never commit passwords or tokens to GitHub.
 
-Colab's default Python is newer than Kokoro supports (3.10–3.12), so this cell creates a Python 3.12 environment first. Paste it into one cell and run it. A public link will appear.
-Colab 預設的 Python 版本較新，Kokoro 不支援，因此以下指令會先建立 Python 3.12 環境。貼到一個儲存格執行，會出現公開連結。
+## Privacy
 
-```python
-!apt-get -qq install -y espeak-ng > /dev/null
-%cd /content
-!rm -rf kokoro-multilingual-tts
-!git clone -q https://github.com/digimarketingai/kokoro-multilingual-tts.git
-%cd /content/kokoro-multilingual-tts
-!pip install -q uv
-!uv venv --seed --python 3.12 /content/py312
-!uv pip install -q --python /content/py312/bin/python -r requirements.txt
-!/content/py312/bin/python app.py --share
+- Speech is generated in the machine running the app.
+- On Colab, that machine is a cloud runtime, not your own computer.
+- Initial model, voice, and language-resource downloads need internet.
+- Enabling translation sends source text to an external translation service.
+- Gradio sharing makes the application reachable through a share URL.
+- Authentication controls who can submit jobs.
+- Audio may be stored temporarily in Gradio's file cache.
+- Do not use this demo for confidential information.
+
+## Troubleshooting
+
+### CUDA unavailable
+
+Select a GPU runtime, reconnect, and rerun `colab_setup.py`.
+
+Check CUDA using the application's Python:
+
+```bash
+/content/kokoro-multilingual-tts/.venv-colab/bin/python -c \
+"import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
-💡 Select **Runtime → Change runtime type → T4 GPU** for faster speech. · 選擇 **執行階段 → 變更執行階段類型 → T4 GPU** 速度更快。
+The launch command uses `--device cuda` so a missing GPU produces an
+error rather than silently falling back to CPU.
 
-💡 If a previous attempt failed, first use **Runtime → Disconnect and delete runtime**. · 若之前執行失敗，請先 **執行階段 → 中斷連線並刪除執行階段**。
+### Wrong Python version
 
-## 🧭 How to use · 使用方式
+Use `.venv-colab/bin/python` for the app on Colab.
 
-1. Type or paste the **source text (ST)**. Put one sentence per line for a dialogue. · 輸入**原文（ST）**，對話請每行一句。
-2. Leave **Source language** and **Source voice** on **Auto**, or pick them manually. · 原文語言與聲音可保持「自動」，或手動選擇。
-3. *(Optional · 選用)* Tick **🌍 Translate**, then choose a **Target language** and **Translation voice**. · 勾選 **🌍 翻譯**，選擇**目標語言**與**譯文聲音**。
-4. Click **🔊 Generate**. You get · 點擊 **🔊 生成**，會得到:
-   - 🅰️ Source speech (ST) · 原文語音
-   - 🅱️ Translation text (TT) · 譯文
-   - 🅱️ Translation speech (TT) · 譯文語音
-5. *(Optional · 選用)* Edit the translation, then click **🔁 Speak edited translation**. · 修改譯文後點擊 **🔁 朗讀修改後的譯文**。
+Do not launch the app using the notebook's default Python executable.
 
-In dialogue mode with **Auto** voice, lines alternate between a female and a male voice. · 對話模式下若聲音為「自動」，各行會女聲／男聲交替。
+### Translation failed
 
-## ⚙️ Command options · 指令參數
+Check internet access and retry later.
+The translation service may throttle requests.
+Source audio and successfully translated text are retained when possible.
 
-| Option 參數 | Description 說明 | Default 預設 |
-|---|---|---|
-| `--share` | Public share link · 公開分享連結 | off |
-| `--host` | Server host · 伺服器位址 | `127.0.0.1` |
-| `--port` | Server port · 連接埠 | `7860` |
+### Japanese dictionary error
 
-## 🛠️ Troubleshooting · 疑難排解
-
-- **`No matching distribution found for kokoro`** → Your Python is too new. Kokoro needs 3.10–3.12. On Colab, use the cell above. Locally, create the venv with Python 3.12. · **找不到 kokoro 版本** → Python 版本太新，Kokoro 需要 3.10–3.12；Colab 請使用上方指令，本機請用 Python 3.12 建立虛擬環境。
-- **The first run is slow** → The model (~330 MB) downloads once. · **第一次很慢** → 模型只需下載一次。
-- **Translation failed** → Check your internet connection. The free translation service may limit very frequent requests, so wait a moment and try again. · **翻譯失敗** → 請檢查網路；免費翻譯服務可能限制頻繁請求，請稍候再試。
-- **Japanese error mentioning `unidic`** → The app tries to download it automatically. If that fails, run `python -m unidic download` (Colab: `!/content/py312/bin/python -m unidic download`). · **日文出現 `unidic` 錯誤** → 程式會自動下載；若失敗請手動執行上述指令。
-- **Some words are skipped** → Make sure espeak-ng is installed. · **部分字詞被略過** → 請確認已安裝 espeak-ng。
-- **The wrong language is detected** → Very short text is hard to detect. Use full sentences or pick the language manually. · **語言偵測錯誤** → 太短的文字難以判斷，請輸入完整句子或手動選擇語言。
-
-## 📂 Project structure · 專案結構
-
-```
-kokoro-multilingual-tts/
-├── app.py            # Gradio app · 主程式
-├── requirements.txt  # Dependencies · 相依套件
-├── README.md
-└── .gitignore
+```bash
+/content/kokoro-multilingual-tts/.venv-colab/bin/python \
+  -m unidic download
 ```
 
-## 🙏 Credits · 致謝
+### Incorrect language detection
 
-- [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) by hexgrad (Apache-2.0)
-- [deep-translator](https://github.com/nidhaloff/deep-translator) (Google Translate)
-- [Gradio](https://www.gradio.app/) · [langdetect](https://github.com/Mimino666/langdetect) · [OpenCC](https://github.com/yichen0831/opencc-python)
+Use complete sentences or choose the source language manually.
+Short text and Japanese written entirely in kanji can be ambiguous.
 
-## 📄 License · 授權
+### First generation is slow
 
-MIT License
+The first request loads the model and may download language resources
+and the selected voice.
+
+### Port already in use
+
+Stop the previous application process or launch with another port:
+
+```bash
+python app.py --port 7861
+```
+
+### Existing Colab checkout is old
+
+The setup cell deliberately does not delete or overwrite your work.
+
+If you have no uncommitted edits, update the checkout:
+
+```bash
+git -C /content/kokoro-multilingual-tts pull --ff-only
+```
+
+Then rerun setup.
+
+## Dependency notes
+
+- This project targets Python 3.12.
+- Kokoro, Misaki, and PyTorch are pinned.
+- Some other dependencies use bounded version ranges.
+- requirements.txt is not a complete transitive dependency lockfile.
+- Validate your environment before wider deployment.
+
+## Credits
+
+- Kokoro-82M by hexgrad
+- Kokoro and Misaki
+- PyTorch
+- Gradio
+- deep-translator
+- langdetect
+- OpenCC
+- uv
+
+## License
+
+Application code: MIT.
+
+Model weights and third-party dependencies retain their own licenses.
