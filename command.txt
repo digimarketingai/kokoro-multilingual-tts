@@ -1,0 +1,19 @@
+# Install system dependencies
+!apt-get update -qq
+!apt-get install -y -qq espeak-ng libsndfile1
+
+# Clone the repository if it isn't already present
+%cd /content
+!test -d kokoro-multilingual-tts || git clone https://github.com/digimarketingai/kokoro-multilingual-tts.git
+%cd /content/kokoro-multilingual-tts
+
+# Create a compatible Python environment and install dependencies
+!pip install -q uv
+!test -x /content/py312/bin/python || uv venv --seed --python 3.12 /content/py312
+!uv pip install --python /content/py312/bin/python -r requirements.txt
+
+# Check GPU availability
+!/content/py312/bin/python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+
+# Start the app
+!/content/py312/bin/python app.py --share
